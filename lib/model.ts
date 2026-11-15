@@ -53,7 +53,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'calibrated-1';
+export const MODEL_VERSION = 'calibrated-2';
 
 /** The model's fixed constants. The multiples are not here: the snapshot calibrates them. */
 export const MODEL = {
@@ -109,11 +109,18 @@ function medianOf(sorted: number[]): number {
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
-/** One category's calibration: the multiple the model applies and how many trading protocols priced it. */
+/** One category's calibration: the multiple the model applies and the evidence it rests on. */
 export interface CategoryCalibration {
   category: string;
   multiple: number;
   samples: number;
+  /** The category's own median market-cap/TVL, before shrinkage toward the global median. */
+  median: number;
+  /** The spread of the clamped ratios behind that median. */
+  ratio_min: number;
+  ratio_max: number;
+  /** Up to three trading protocols whose ratios sit nearest the category median: the peers the multiple rests on. */
+  peers: { name: string; ratio: number }[];
 }
 
 /** What the snapshot's trading protocols teach the model, plus the age an unlisted date falls back to. */
@@ -134,21 +141,37 @@ export function calibrate(snapshot: Snapshot): Calibration {
   const ratio = (p: SnapshotProtocol): number => clamp(p.mcap_usd! / p.tvl_usd, MODEL.ratio_clamp_lo, MODEL.ratio_clamp_hi);
   const globalMedian = medianOf(trading.map(ratio).sort((a, b) => a - b));
 
-  const ratiosByCategory = new Map<string, number[]>();
+  const ratiosByCategory = new Map<string, { name: string; ratio: number }[]>();
   for (const p of trading) {
     const key = p.category ?? '';
     const list = ratiosByCategory.get(key);
-    if (list === undefined) ratiosByCategory.set(key, [ratio(p)]);
-    else list.push(ratio(p));
+    if (list === undefined) ratiosByCategory.set(key, [{ name: p.name, ratio: ratio(p) }]);
+    else list.push({ name: p.name, ratio: ratio(p) });
   }
   const categories: CategoryCalibration[] = [];
   const byCategory = new Map<string, CategoryCalibration>();
   for (const key of [...ratiosByCategory.keys()].sort()) {
-    const samples = ratiosByCategory.get(key)!.slice().sort((a, b) => a - b);
+    const entries = ratiosByCategory.get(key)!;
+    const samples = entries.map((e) => e.ratio).sort((a, b) => a - b);
     const catMedian = medianOf(samples);
     const n = samples.length;
     const shrunk = (n * catMedian + MODEL.prior_samples * globalMedian) / (n + MODEL.prior_samples);
-    const entry: CategoryCalibration = { category: key, multiple: round4(clamp(shrunk, MODEL.multiple_lo, MODEL.multiple_hi)), samples: n };
+    // The peers nearest the median are the evidence a reader can check the multiple against:
+    // closest ratio first, the protocol's name breaking a tie, so the pick never varies by run.
+    const peers = entries
+      .slice()
+      .sort((a, b) => Math.abs(a.ratio - catMedian) - Math.abs(b.ratio - catMedian) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .slice(0, 3)
+      .map((e) => ({ name: e.name, ratio: round4(e.ratio) }));
+    const entry: CategoryCalibration = {
+      category: key,
+      multiple: round4(clamp(shrunk, MODEL.multiple_lo, MODEL.multiple_hi)),
+      samples: n,
+      median: round4(catMedian),
+      ratio_min: round4(samples[0]!),
+      ratio_max: round4(samples[n - 1]!),
+      peers,
+    };
     categories.push(entry);
     byCategory.set(key, entry);
   }
@@ -292,6 +315,13 @@ function fmtChange(change: number | null): string {
   return `${change > 0 ? '+' : ''}${change.toFixed(1)}%`;
 }
 
+/** The protocol's week in one clause, worded for a null change as well as a number. */
+function trendPhrase(p: SnapshotProtocol): string {
+  return p.change_7d === null
+    ? `${p.name} reports no 7-day TVL change in the snapshot`
+    : `${p.name} moved ${fmtChange(p.change_7d)} in TVL over the last 7 days`;
+}
+
 type Playbook = 'dex' | 'lending' | 'cdp' | 'perp' | 'yield' | 'curator' | 'bridge' | 'rwa' | 'launchpad' | 'prediction' | 'insurance' | 'staking' | 'generic';
 
 const PLAYBOOK_BY_CATEGORY = new Map<string, Playbook>([
@@ -368,35 +398,42 @@ function coreStep(book: Playbook, name: string, chain: string, cap: number, gas:
   }
 }
 
-/** The playbook's second action: the follow-through that separates a user from a one-off visitor. */
-function secondStep(book: Playbook, name: string, cap2: number, gas: string): string {
+/**
+ * The playbook's second action: the follow-through that separates a user from a one-off visitor.
+ * Every template names the protocol and at least one more of its own figures - its chain, its
+ * TVL, its 7-day trend - so no two protocols on the board ever share this step's wording.
+ */
+function secondStep(book: Playbook, p: SnapshotProtocol, cap2: number, gas: string): string {
+  const name = p.name;
+  const chain = p.chains.length > 0 ? p.chains[0]! : 'its main chain';
+  const tvl = fmtUsd(p.tvl_usd);
   switch (book) {
     case 'dex':
-      return `Add a second, smaller position of $${cap2} in a correlated pool (the ETH/USDC pool if ${name} has one) so the wallet's history shows range, not a single trade. Cost: $${cap2} plus ${gas}. Time: 15 minutes.`;
+      return `Add a second, smaller position of $${cap2} in a correlated pool on ${name} (the ETH/USDC pool if it lists one) so the wallet's history shows range, not a single trade. ${trendPhrase(p)}, so keep this second position at half size until the trend confirms. Cost: $${cap2} plus ${gas}. Time: 15 minutes.`;
     case 'lending':
-      return `Borrow $${cap2} of USDC against the supply once and repay it within the week: one completed borrow-and-repay cycle is the action lending snapshots most reliably record. Cost: a few cents of interest plus ${gas}. Time: 10 minutes.`;
+      return `Borrow $${cap2} of USDC against the ${name} supply once and repay it within the week: one completed borrow-and-repay cycle is the action lending snapshots most reliably record. Do it on ${chain}, where the supplied position already sits. Cost: a few cents of interest plus ${gas}. Time: 10 minutes.`;
     case 'cdp':
-      return `Repay a slice of the minted stablecoin and top the collateral back up once, so the vault shows both mint and repay activity, not just a deposit. Cost: ${gas} on each transaction. Time: 10 minutes.`;
+      return `Repay a slice of the stablecoin minted through ${name} and top the collateral back up once, so the vault shows both mint and repay activity, not just a deposit. ${name}'s vaults hold ${tvl} of collateral, so a small vault sits in deep company. Cost: ${gas} on each transaction. Time: 10 minutes.`;
     case 'perp':
-      return `Close and reopen the hedge once a week at a similar size; steady weekly volume beats one large trade in most points formulas. Cost: roughly 0.1% in fees per round trip plus ${gas}. Time: 10 minutes a week.`;
+      return `Close and reopen the ${name} hedge once a week at a similar size; steady weekly volume beats one large trade in most points formulas. ${trendPhrase(p)} - if the trend turns sharply negative, halve the size rather than stopping outright. Cost: roughly 0.1% in fees per round trip plus ${gas}. Time: 10 minutes a week.`;
     case 'yield':
-      return `Move $${cap2} into a second vault running a different strategy (a lending vault if the first is a basis vault), so the wallet is not riding one yield source. Cost: $${cap2} plus ${gas}. Time: 15 minutes.`;
+      return `Move $${cap2} into a second ${name} vault running a different strategy (a lending vault if the first is a basis vault), so the wallet is not riding one yield source. Pick the second-largest vault on ${chain} by TVL. Cost: $${cap2} plus ${gas}. Time: 15 minutes.`;
     case 'curator':
-      return `Rebalance once after two weeks: shift 10-20% toward whichever of the two vaults grew its TVL share, and write both vault addresses into the farm log. Cost: ${gas} on each move. Time: 15 minutes.`;
+      return `Rebalance the ${name} position once after two weeks: shift 10-20% toward whichever of the two vaults grew its TVL share, and write both vault addresses into the farm log. ${name} curates ${tvl} in all, so vault shares move slowly - a fortnight is long enough to see the shift. Cost: ${gas} on each move. Time: 15 minutes.`;
     case 'bridge':
-      return `Bridge a second, smaller amount ($${cap2}) back the other way a week later, so the wallet shows traffic in both directions rather than a single crossing. Cost: $${cap2} moved, fees under 0.1%, plus ${gas}. Time: 30 minutes.`;
+      return `Bridge a second, smaller amount ($${cap2}) back through ${name} the other way a week later, so the wallet shows traffic in both directions rather than a single crossing. Cost: $${cap2} moved, fees under 0.1%, plus ${gas}. Time: 30 minutes.`;
     case 'rwa':
-      return `When the first yield lands (often monthly), claim or compound it and leave the proceeds in the asset instead of withdrawing to the wallet. Cost: ${gas}. Time: 5 minutes when due.`;
+      return `When the first yield on the ${name} position lands (often monthly), claim or compound it and leave the proceeds in the asset instead of withdrawing to the wallet; ${name} holds ${tvl} of real-world assets, and its payouts follow that schedule, not a chain clock. Cost: ${gas}. Time: 5 minutes when due.`;
     case 'launchpad':
-      return `Hold whatever the round issues and join ${name}'s next round rather than flipping the first allocation; repeat participants are the wallets launchpads remember. Cost: no new capital. Time: 10 minutes a round.`;
+      return `Hold whatever the round issues and join ${name}'s next round on ${chain} rather than flipping the first allocation; repeat participants are the wallets launchpads remember. Cost: no new capital. Time: 10 minutes a round.`;
     case 'prediction':
-      return `Settle finished positions promptly and roll $${cap2} into a fresh market each week; a settled history is what a prediction market can score. Cost: ${gas} per settlement. Time: 10 minutes a week.`;
+      return `Settle finished ${name} positions promptly and roll $${cap2} into a fresh market each week; a settled history is what a prediction market can score. ${trendPhrase(p)}, a rough read on how busy its markets are. Cost: ${gas} per settlement. Time: 10 minutes a week.`;
     case 'insurance':
-      return `Renew or extend the cover once before it expires, so coverage runs continuously across snapshot dates instead of lapsing after a single purchase. Cost: another premium slice plus ${gas}. Time: 10 minutes.`;
+      return `Renew or extend the ${name} cover once before it expires, so coverage runs continuously across snapshot dates instead of lapsing after a single purchase. Keep the covered protocol the same one the first ${name} policy names. Cost: another premium slice (roughly 2-3% of the cover per year) plus ${gas}. Time: 10 minutes.`;
     case 'staking':
-      return `Claim staking rewards once they pass $5 and restake them into the same position, so the balance the snapshots see keeps compounding. Cost: ${gas} per claim. Time: 5 minutes.`;
+      return `Claim ${name} staking rewards once they pass $5 and restake them into the same position on ${chain}, so the balance the snapshots see keeps compounding. Cost: ${gas} per claim. Time: 5 minutes.`;
     default:
-      return `Repeat the core action once at half size ($${cap2}) in a later week, so the wallet's history spans more than one day. Cost: $${cap2} plus ${gas}. Time: 10 minutes.`;
+      return `Repeat the core ${name} action once at half size ($${cap2}) in a later week, so the wallet's history spans more than one day. ${name} holds ${tvl} of TVL; if that figure halves before the repeat, skip it and keep the first position only. Cost: $${cap2} plus ${gas}. Time: 10 minutes.`;
   }
 }
 
@@ -436,7 +473,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
       ? `Check ${p.name}'s own site and announcement channel weekly for a points page or a token post; if a claim ever opens, use only the link the protocol itself publishes, and never pay a fee to claim. Cost: nothing to check. Time: 5 minutes a week.`
       : `Log every transaction hash, date and balance in a farm log, and check ${p.name}'s official channels weekly; a claim, if one ever opens, is announced there first - treat any other claim site as a scam. Cost: nothing. Time: 10 minutes a week.`;
 
-  return [setup, coreStep(book, p.name, chain, cap, gas), secondStep(book, p.name, cap2, gas), sizing, holdStep, watch];
+  return [setup, coreStep(book, p.name, chain, cap, gas), secondStep(book, p, cap2, gas), sizing, holdStep, watch];
 }
 
 // ------------------------------------------------------------------ the board

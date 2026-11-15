@@ -20,6 +20,19 @@ worth, and pairs every rank with a concrete farm plan.
 No protocol names or values are hardcoded; everything derives from the
 snapshot figures.
 
+## The dashboard
+
+A dark scope-room page, fully offline. A highlights strip (top of the
+board, top early find, biggest 7-day mover, longest running) and a
+value-distribution chart sit above a sortable, filterable board with a
+sticky header. Every protocol opens a detail drawer: KPI tiles, the
+factor bars, the multiplication itself, and an evidence block showing
+the trading peers the row's category multiple rests on - their ratio
+spread, the category median, and the peers nearest that median. Every
+farm plan is written for its own protocol: its chains, its TVL, its
+7-day trend and its age set the wording, so no two plans on the board
+share a step.
+
 ## Run
 
 ```sh
