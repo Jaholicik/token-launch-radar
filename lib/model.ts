@@ -22,12 +22,16 @@
 //   breadth            1 + 0.025 x min(chains - 1, 8): each extra chain the TVL already sits
 //                      on adds a little, capped at eight.
 //
-// The board covers every slug in the snapshot's watchlist, then adds the strongest pre-token
-// protocols below the floor under the same exclusions the watchlist itself uses: no CEX, no
-// versioned pool of another protocol, and no wrapped, staked or bridged product (the Bridge,
-// Canonical Bridge, Liquid Staking, Liquid Restaking and Restaked BTC categories, names
-// carrying a whole word wrapped, staked or staking, and names opening with an exchange's).
-// A wrapped product of a token that already trades is not a launch still to come, at any TVL.
+// The board covers every slug in the snapshot's watchlist, then widens the net the way the
+// snapshot's own README invites ("a floor, never a ceiling"): the strongest pre-token
+// protocols below the floor, plus the pre-token protocols at or above the floor that the
+// house's list leaves out, all under the same exclusions the watchlist itself uses: no CEX,
+// no versioned pool of another protocol, and no wrapped, staked or bridged product (the
+// Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking and Restaked BTC categories,
+// names carrying a whole word wrapped, staked or staking, and names opening with an
+// exchange's). A wrapped product of a token that already trades is not a launch still to
+// come, at any TVL. Each row also carries the record's own warning signs (riskFlags) and a
+// one-line read of its figures (signalLine), both derived from the snapshot alone.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -53,7 +57,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'calibrated-2';
+export const MODEL_VERSION = 'calibrated-3';
 
 /** The model's fixed constants. The multiples are not here: the snapshot calibrates them. */
 export const MODEL = {
@@ -77,7 +81,7 @@ export const MODEL = {
   /** How many pre-token protocols below the floor the early radar carries, by TVL. */
   early_rows: 160,
   /** How many live-token protocols the set-aside view carries, by market cap. */
-  live_rows: 24,
+  live_rows: 48,
 } as const;
 
 /** Why the snapshot is not one this model can score. */
@@ -247,6 +251,44 @@ export function scoreProtocol(p: SnapshotProtocol, snapshot: Snapshot, calib: Ca
     age_days: age,
     implied_value_usd: implied,
   };
+}
+
+/**
+ * The warning signs a protocol's own record carries, in the order a farmer meets them:
+ * a shrinking week, an unreported week, a single chain, a short or unreported history, and
+ * a category multiple with little or no trading evidence behind it. Every flag is a fact
+ * of the snapshot's figures, worded with the figure itself; a protocol with none of them
+ * gets an empty list, never a compliment the record does not support.
+ */
+export function riskFlags(p: SnapshotProtocol, score: ScoreBreakdown): string[] {
+  const flags: string[] = [];
+  if (p.change_7d !== null && p.change_7d <= -10) flags.push(`TVL fell ${Math.abs(p.change_7d).toFixed(1)}% in 7 days`);
+  if (p.change_7d === null) flags.push('no 7-day TVL change reported');
+  if (p.chains.length <= 1) flags.push('TVL sits on a single chain');
+  if (score.age_days === null) flags.push('listing date unreported - maturity falls back to the snapshot median age');
+  else if (score.age_days < 180) flags.push(`young record: listed ${score.age_days} days before the snapshot`);
+  if (score.calibration_samples === 0) flags.push('no trading protocol in its category - the global median multiple applies');
+  else if (score.calibration_samples <= 2) {
+    flags.push(`thin calibration: its category multiple rests on ${score.calibration_samples} trading protocol${score.calibration_samples === 1 ? '' : 's'}`);
+  }
+  return flags;
+}
+
+/** A protocol's age the way a reader scans it: 3.2y, or 214d. */
+function fmtAge(days: number): string {
+  return days >= 365 ? `${(days / 365).toFixed(1)}y` : `${Math.round(days)}d`;
+}
+
+/**
+ * One line that reads a protocol's figures the way the model does: its week's trend, how
+ * long it has run with no token, how many chains its TVL sits on, and the price its
+ * category carries. The drawer's summary and the short list both show it.
+ */
+export function signalLine(p: SnapshotProtocol, score: ScoreBreakdown): string {
+  const trend = p.change_7d === null ? 'no 7-day trend reported' : `${fmtChange(p.change_7d)} TVL in 7 days`;
+  const age = score.age_days === null ? 'listing date unreported' : `${fmtAge(score.age_days)} running with no token`;
+  const breadth = p.chains.length > 1 ? `${p.chains.length} chains` : `one chain${p.chains.length === 1 ? ` (${p.chains[0]})` : ''}`;
+  return `${trend}; ${age}; ${breadth}; its category is priced at ${score.category_multiple.toFixed(2)}x TVL`;
 }
 
 // ------------------------------------------------------------------ farm plans
@@ -493,8 +535,14 @@ export interface BoardRow {
   symbol: string | null;
   token_status: 'pre-token';
   watchlist: boolean;
+  /** At or above the watchlist's floor, yet not on the house's list: the net widened past it. */
+  above_floor: boolean;
   age_days: number | null;
   implied_value_usd: number;
+  /** The one-line read of this protocol's figures, from signalLine. */
+  signal: string;
+  /** The warning signs its own record carries, from riskFlags; empty when it carries none. */
+  risk_flags: string[];
   model: {
     category_multiple: number;
     calibration_samples: number;
@@ -531,6 +579,8 @@ export interface RadarData {
   watchlist_size: number;
   board_size: number;
   early_size: number;
+  /** Ranked rows at or above the floor that the house's list leaves out. */
+  above_size: number;
   live_size: number;
   rows: BoardRow[];
   live: LiveRow[];
@@ -551,6 +601,15 @@ export function buildBoard(snapshot: Snapshot, calib: Calibration): BoardRow[] {
     .sort((a, b) => b.tvl_usd - a.tvl_usd || bySlugAsc(a, b))
     .slice(0, MODEL.early_rows);
   for (const p of early) chosen.set(p.slug, p);
+  // The list is a floor, never a ceiling: a pre-token protocol at or above the floor that
+  // the house's rule left out (its record in the full DefiLlama file names a parent, a
+  // field this snapshot does not carry) is no worse a subject than one on it, so the net
+  // takes every one that passes the same exclusions the early set passes. All of them are
+  // taken, never a capped slice: above the floor the count is small and each one is large.
+  const above = snapshot.protocols.filter(
+    (p) => !chosen.has(p.slug) && isEarlyCandidate(p) && p.tvl_usd >= snapshot.floor_usd,
+  );
+  for (const p of above) chosen.set(p.slug, p);
 
   const watchlist = new Set(snapshot.watchlist);
   const scored = [...chosen.values()].map((p) => ({ p, score: scoreProtocol(p, snapshot, calib) }));
@@ -569,8 +628,11 @@ export function buildBoard(snapshot: Snapshot, calib: Calibration): BoardRow[] {
     symbol: s.p.symbol,
     token_status: 'pre-token' as const,
     watchlist: watchlist.has(s.p.slug),
+    above_floor: !watchlist.has(s.p.slug) && s.p.tvl_usd >= snapshot.floor_usd,
     age_days: s.score.age_days,
     implied_value_usd: s.score.implied_value_usd,
+    signal: signalLine(s.p, s.score),
+    risk_flags: riskFlags(s.p, s.score),
     model: {
       category_multiple: s.score.category_multiple,
       calibration_samples: s.score.calibration_samples,
@@ -617,7 +679,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     },
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
-    early_size: board.filter((r) => !r.watchlist).length,
+    early_size: board.filter((r) => !r.watchlist && !r.above_floor).length,
+    above_size: board.filter((r) => r.above_floor).length,
     live_size: live.length,
     rows: board,
     live,

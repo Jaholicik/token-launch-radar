@@ -1,7 +1,8 @@
 // Launch Radar's page. It reads window.RADAR (written beside dashboard/ by main.ts) and renders
-// the ranked board, its filters, a per-protocol detail drawer with the model's factors, the
-// evidence behind its category multiple and the protocol's farm plan, and the live-token set
-// the model calibrated on. No network: every byte it shows arrived in data.js.
+// the ranked board, a top-ten short list with the method stated up front, its filters, a
+// per-protocol detail drawer with the model's factors, the evidence behind its category
+// multiple, the record's own warning signs and the protocol's farm plan, and the live-token
+// set the model calibrated on. No network: every byte it shows arrived in data.js.
 //
 // The model the page states, and main.ts runs:
 //   implied = TVL x category multiple x momentum x maturity x breadth
@@ -82,7 +83,8 @@
     var q = state.q.trim().toLowerCase();
     return D.rows.filter(function (r) {
       if (state.seg === 'watchlist' && !r.watchlist) return false;
-      if (state.seg === 'early' && r.watchlist) return false;
+      if (state.seg === 'early' && (r.watchlist || r.above_floor)) return false;
+      if (state.seg === 'above' && !r.above_floor) return false;
       if (state.category !== 'all' && r.category !== state.category) return false;
       if (state.chain !== 'all' && r.chains.indexOf(state.chain) < 0) return false;
       if (q && r.name.toLowerCase().indexOf(q) < 0 && r.slug.indexOf(q) < 0) return false;
@@ -123,7 +125,7 @@
       el('div', { class: 'stats' },
         stat(String(D.board_size), 'ranked'),
         stat(String(D.watchlist_size) + '/' + String(D.watchlist_size), 'watchlist covered'),
-        stat(String(D.early_size), 'early finds'),
+        stat(String(D.early_size + D.above_size), 'beyond the list'),
         stat(D.as_of, 'snapshot date')
       )
     );
@@ -155,6 +157,35 @@
     );
   }
 
+  /* ------------------------------------------------ the short list: method + top ten, up front */
+  function shortlistSection() {
+    var top = D.rows.slice(0, 10);
+    var items = top.map(function (r) {
+      var row = el('button', { class: 'sl-row', type: 'button' },
+        el('span', { class: 'sl-rank', text: '#' + r.rank }),
+        el('span', { class: 'sl-main' },
+          el('span', { class: 'sl-name', text: r.name },
+            r.watchlist ? el('span', { class: 'wl', text: '\u2605 watchlist' }) : null,
+            r.above_floor ? el('span', { class: 'abv', text: 'above the floor' }) : null,
+            r.risk_flags.length ? el('span', { class: 'flags', text: '\u2691 ' + r.risk_flags.length }) : null),
+          el('span', { class: 'sl-sig', text: r.signal })),
+        el('span', { class: 'sl-nums' },
+          el('b', { text: fmtUsd(r.implied_value_usd) }),
+          el('span', { text: 'TVL ' + fmtUsd(r.tvl_usd) + ' \u00b7 7d ' + fmtPct(r.change_7d) })));
+      row.addEventListener('click', function () { state.detail = r.slug; render(); });
+      return row;
+    });
+    return el('section', { class: 'shortlist' },
+      el('h2', { text: 'The short list - where a farmer starts' }),
+      el('p', { class: 'sl-method' },
+        document.createTextNode('The method, in one breath: every protocol here records no token in the snapshot. Each is priced by what the market already pays per TVL dollar for its category - read off this snapshot\u2019s own trading protocols, never a hand-kept list - then adjusted for its week\u2019s growth, its age and its chains. The watchlist is the floor, not the ceiling: the board also ranks '),
+        el('b', { text: String(D.above_size) + ' protocols above that floor' }),
+        document.createTextNode(' the house\u2019s list leaves out, and '),
+        el('b', { text: String(D.early_size) + ' early finds below it' }),
+        document.createTextNode('. These ten rows are the board\u2019s head: open any one for the evidence behind its price, its warning signs and its farm plan.')),
+      el('div', { class: 'sl-list' }, items));
+  }
+
   /* ------------------------------------------------ scope: highlights + distribution */
   function hlCard(eye, r, big, sub) {
     var card = el('button', { class: 'hl-card', type: 'button' },
@@ -177,7 +208,7 @@
     });
     var cards = [];
     if (top) cards.push(hlCard('Top of the board', top, fmtUsd(top.implied_value_usd) + ' implied', 'rank #1 \u00b7 ' + (top.category || 'uncategorised') + ' \u00b7 TVL ' + fmtUsd(top.tvl_usd)));
-    if (topEarly) cards.push(hlCard('Top early find', topEarly, fmtUsd(topEarly.implied_value_usd) + ' implied', 'rank #' + topEarly.rank + ' \u00b7 below the watchlist floor \u00b7 TVL ' + fmtUsd(topEarly.tvl_usd)));
+    if (topEarly) cards.push(hlCard('Top find beyond the list', topEarly, fmtUsd(topEarly.implied_value_usd) + ' implied', 'rank #' + topEarly.rank + ' \u00b7 ' + (topEarly.above_floor ? 'above the watchlist floor' : 'below the watchlist floor') + ' \u00b7 TVL ' + fmtUsd(topEarly.tvl_usd)));
     if (mover) cards.push(hlCard('Biggest 7d mover', mover, fmtPct(mover.change_7d) + ' TVL in 7d', 'rank #' + mover.rank + ' \u00b7 ' + fmtUsd(mover.implied_value_usd) + ' implied'));
     if (elder) cards.push(hlCard('Longest running, no token', elder, fmtAge(elder.age_days) + ' and counting', 'listed ' + (elder.listed_at || 'unreported') + ' \u00b7 rank #' + elder.rank));
 
@@ -241,7 +272,7 @@
     }
     return el('div', { class: 'controls' },
       search, catSel, chainSel,
-      el('span', { class: 'seg' }, segBtn('all', 'Whole board'), segBtn('watchlist', 'Watchlist'), segBtn('early', 'Early finds')),
+      el('span', { class: 'seg' }, segBtn('all', 'Whole board'), segBtn('watchlist', 'Watchlist'), segBtn('above', 'Above floor'), segBtn('early', 'Early finds')),
       sortSel,
       el('span', { class: 'count', text: count + ' shown' }));
   }
@@ -263,6 +294,7 @@
     if (state.category !== 'all') parts.push('category ' + state.category);
     if (state.chain !== 'all') parts.push('chain ' + state.chain);
     if (state.seg === 'watchlist') parts.push('the watchlist segment');
+    if (state.seg === 'above') parts.push('the above-floor segment');
     if (state.seg === 'early') parts.push('the early-finds segment');
     return parts;
   }
@@ -296,7 +328,10 @@
       var tr = el('tr', null,
         el('td', { class: 'rank', text: String(r.rank) }),
         el('td', null,
-          el('span', { class: 'pname', text: r.name }, r.watchlist ? el('span', { class: 'wl', text: '\u2605 watchlist' }) : null),
+          el('span', { class: 'pname', text: r.name },
+            r.watchlist ? el('span', { class: 'wl', text: '\u2605 watchlist' }) : null,
+            r.above_floor ? el('span', { class: 'abv', text: 'above the floor' }) : null,
+            r.risk_flags.length ? el('span', { class: 'flags', title: r.risk_flags.join('; '), text: '\u2691 ' + r.risk_flags.length }) : null),
           el('span', { class: 'slug', text: r.slug })),
         el('td', { class: 'cat', text: r.category || 'uncategorised' }),
         el('td', { class: 'chains', text: r.chains.slice(0, 3).join(', ') + (r.chains.length > 3 ? ' +' + (r.chains.length - 3) : '') }),
@@ -344,6 +379,16 @@
     }
     return el('div', { class: 'evidence' }, kids);
   }
+  function signalsBlock(r) {
+    var kids = [el('div', { class: 'ehead', text: 'The read - and what to watch' })];
+    kids.push(el('div', { text: r.signal + '.' }));
+    if (r.risk_flags.length) {
+      kids.push(el('ul', { class: 'flaglist' }, r.risk_flags.map(function (f) { return el('li', { text: f }); })));
+    } else {
+      kids.push(el('div', { class: 'noflags', text: 'Its record carries none of the board\u2019s warning signs: no shrinking week, no missing figures, more than one chain, a history past six months, and a category multiple with trading evidence behind it.' }));
+    }
+    return el('div', { class: 'evidence sig' }, kids);
+  }
   function drawer(r) {
     var m = r.model;
     var close = el('button', { class: 'close', text: '\u00d7', 'aria-label': 'Close detail' });
@@ -351,17 +396,18 @@
     var scrim = el('div', { class: 'scrim' });
     scrim.addEventListener('click', function () { state.detail = null; render(); });
     var steps = el('ol', { class: 'steps' }, r.farm_steps.map(function (s) { return el('li', { text: s }); }));
+    var median = D.rows.length ? D.rows[Math.floor(D.rows.length / 2)].implied_value_usd : 0;
     var arith = el('div', null,
       el('div', { class: 'arith' },
         document.createTextNode(fmtUsd(r.tvl_usd) + ' TVL \u00d7 ' + m.category_multiple.toFixed(2) + ' \u00d7 ' + m.momentum_multiplier.toFixed(2) + ' \u00d7 ' + m.maturity_multiplier.toFixed(2) + ' \u00d7 ' + m.breadth_multiplier.toFixed(2) + ' '),
         el('span', { class: 'eq', text: '\u2248 ' + fmtUsd(r.implied_value_usd) })),
-      el('p', { class: 'arith-note', text: 'Factors rounded to two places here; the board multiplies the unrounded factors and rounds the result once, to whole dollars.' }));
+      el('p', { class: 'arith-note', text: 'Factors rounded to two places here; the board multiplies the unrounded factors and rounds the result once, to whole dollars. Against the board\u2019s median implied value of ' + fmtUsd(median) + ', this row stands at ' + (median > 0 ? (r.implied_value_usd / median).toFixed(1) : '0') + '\u00d7 the median.' }));
     var panel = el('aside', { class: 'drawer' },
       close,
       el('h2', { text: r.name }),
       el('div', { class: 'sub' },
         el('span', { class: 'badge', text: 'rank #' + r.rank + ' of ' + D.board_size }),
-        r.watchlist ? el('span', { class: 'badge amber', text: 'watchlist' }) : el('span', { class: 'badge', text: 'early find' }),
+        r.watchlist ? el('span', { class: 'badge amber', text: 'watchlist' }) : r.above_floor ? el('span', { class: 'badge', text: 'above the floor - beyond the list' }) : el('span', { class: 'badge', text: 'early find' }),
         el('span', { class: 'badge', text: 'records no token' })),
       el('div', { class: 'kpis' },
         kpi(fmtUsd(r.implied_value_usd), 'Implied value'),
@@ -379,6 +425,7 @@
         factorRow('Breadth (chains)', m.breadth_multiplier.toFixed(2) + 'x', (m.breadth_multiplier - 1) * 400)),
       arith,
       evidenceBlock(r, m),
+      signalsBlock(r),
       el('h3', { text: 'The farm plan' }),
       steps,
       el('h3', { text: 'The record' }),
@@ -398,7 +445,7 @@
     });
     return el('section', { class: 'live' },
       el('h2', { text: 'Already trading - set aside, and used as the yardstick' }),
-      el('p', { text: 'These protocols\u2019 tokens already trade, so the board never ranks them: it shows the market\u2019s own value. Their market-cap/TVL ratios are what calibrate the multiples above - the radar prices the launches to come by what the market already pays for the ones that arrived.' }),
+      el('p', { text: 'These protocols\u2019 tokens already trade, so the board never ranks them: it shows the market\u2019s own value. Their market-cap/TVL ratios are what calibrate the multiples above - the radar prices the launches to come by what the market already pays for the ones that arrived. Shown: the ' + D.live.length + ' largest by market cap of the snapshot\u2019s trading protocols.' }),
       el('table', { class: 'live-t' },
         el('thead', null, el('tr', null,
           el('th', { text: 'Protocol' }), el('th', { text: 'Category' }),
@@ -415,8 +462,9 @@
     var rows = sortedRows(visibleRows());
     app.textContent = '';
     app.appendChild(masthead());
-    app.appendChild(modelStrip());
+    app.appendChild(shortlistSection());
     app.appendChild(scopeSection());
+    app.appendChild(modelStrip());
     app.appendChild(controls(rows.length));
     app.appendChild(boardTable(rows));
     app.appendChild(liveSection());
